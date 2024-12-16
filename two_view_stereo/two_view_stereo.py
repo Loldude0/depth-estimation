@@ -64,7 +64,15 @@ def rectify_2view(rgb_i, rgb_j, R_irect, R_jrect, K_i, K_j, u_padding=20, v_padd
     K_j_corr[1, 2] -= vj_min + v_padding
 
     """Student Code Starts"""
+    H_i = K_i_corr @ R_irect @ np.linalg.inv(K_i)
+    H_j = K_j_corr @ R_jrect @ np.linalg.inv(K_j)
     
+    # Create the destination image size
+    size_new = (w_max, h_max)
+    
+    # Use perspective warping to rectify the images
+    rgb_i_rect = cv2.warpPerspective(rgb_i, H_i, size_new)
+    rgb_j_rect = cv2.warpPerspective(rgb_j, H_j, size_new)
     """Student Code Ends"""
 
     return rgb_i_rect, rgb_j_rect, K_i_corr, K_j_corr
@@ -86,6 +94,9 @@ def compute_right2left_transformation(R_iw, T_iw, R_jw, T_jw):
     """
 
     """Student Code Starts"""
+    R_ij = R_iw @ R_jw.T
+    T_ij = T_iw - R_iw @ R_jw.T @ T_jw
+    B = float(np.linalg.norm(T_ij))
     
     """Student Code Ends"""
 
