@@ -128,6 +128,31 @@ def compute_rectification_R(T_ij):
 
     return R_irect
 
+def ct_kernel(src, dst, in_cuda=False):
+    assert src.ndim == 3 and dst.ndim == 3
+    assert src.shape[1:] == dst.shape[1:]
+    src = torch.from_numpy(src).cuda() if not in_cuda else src
+    dst = torch.from_numpy(dst).cuda() if not in_cuda else dst
+    K = int(np.sqrt(src.shape[1]))
+    src = src.view(src.shape[0], K, K, 3)
+    dst = dst.view(dst.shape[0], K, K, 3)
+
+    center = K // 2
+    src_center = src[:, center, center, :].unsqueeze(1).unsqueeze(1)
+    dst_center = dst[:, center, center, :].unsqueeze(1).unsqueeze(1)
+    src_census = (src > src_center).float()
+    dst_census = (dst > dst_center).float()
+
+    src_bits = src_census.reshape(src.shape[0], -1)
+    dst_bits = dst_census.reshape(dst.shape[0], -1)
+
+    M, N = src_bits.shape[0], dst_bits.shape[0]
+    src_exp = src_bits.unsqueeze(1).expand(-1, N, -1)
+    dst_exp = dst_bits.unsqueeze(0).expand(M, -1, -1)
+    hamming_dist = torch.sum((src_exp != dst_exp).float(), dim=2)
+
+    return hamming_dist.cpu().numpy() if not in_cuda else hamming_dist
+        
 
 def ssd_kernel(src, dst, in_cuda=False):
     """Compute SSD Error, the RGB channels should be treated saperately and finally summed up
@@ -162,8 +187,8 @@ def ssd_kernel(src, dst, in_cuda=False):
     return ssd  # M,N
 
 
-def sad_kernel(src, dst):
-    """Compute SSD Error, the RGB channels should be treated saperately and finally summed up
+def sad_kernel(src, dst, in_cuda=False):
+    """Compute SAD Error, the RGB channels should be treated saperately and finally summed up
 
     Parameters
     ----------
@@ -182,7 +207,13 @@ def sad_kernel(src, dst):
     assert src.shape[1:] == dst.shape[1:]
 
     """Student Code Starts"""
-    
+    src = torch.from_numpy(src).cuda() if not in_cuda else src
+    dst = torch.from_numpy(dst).cuda() if not in_cuda else dst
+    src_exp = src.unsqueeze(1)
+    dst_exp = dst.unsqueeze(0)
+    sad = torch.abs(src_exp - dst_exp).sum(dim=(2,3))
+    sad = sad.cpu().numpy() if not in_cuda else sad
+
     """Student Code Ends"""
 
     return sad  # M,N
@@ -232,6 +263,46 @@ def zncc_kernel(src, dst, in_cuda=False):
 
     return zncc * (-1.0)  # M,N
 
+def sobel(m):
+    sobel_x = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=torch.float32, device='cuda').unsqueeze(0).unsqueeze(0)
+    sobel_y = torch.tensor([[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=torch.float32, device='cuda').unsqueeze(0).unsqueeze(0)
+    
+    grad_x = torch.nn.functional.conv2d(m, sobel_x, padding=1)
+    grad_y = torch.nn.functional.conv2d(m, sobel_y, padding=1)
+    mag = torch.sqrt(grad_x**2 + grad_y**2 + 1e-12)
+    return mag.squeeze(1)
+
+def sobel_zncc_kernel(src, dst, in_cuda=False):
+    assert src.ndim == 3 and dst.ndim == 3
+    assert src.shape[1:] == dst.shape[1:]
+    src = torch.from_numpy(src).cuda().float() if not in_cuda else src.float()
+    dst = torch.from_numpy(dst).cuda().float() if not in_cuda else dst.float()
+    patch_size = int(np.sqrt(src.shape[1]))
+    total_zncc = torch.zeros((src.shape[0], dst.shape[0]), device='cuda')
+    for c in range(3):
+        src_c = src[..., c].reshape(-1, patch_size, patch_size)
+        dst_c = dst[..., c].reshape(-1, patch_size, patch_size)
+        src_c = src_c.unsqueeze(1)
+        dst_c = dst_c.unsqueeze(1)
+        src_grad = sobel(src_c)
+        dst_grad = sobel(dst_c)
+        src_grad = src_grad.view(src_grad.size(0), -1)
+        dst_grad = dst_grad.view(dst_grad.size(0), -1)
+        mean_src = src_grad.mean(dim=1, keepdim=True)
+        mean_dst = dst_grad.mean(dim=1, keepdim=True)
+        norm_src = src_grad - mean_src
+        norm_dst = dst_grad - mean_dst
+        std_src = torch.sqrt(torch.sum(norm_src**2, dim=1, keepdim=True) + 1e-12)
+        std_dst = torch.sqrt(torch.sum(norm_dst**2, dim=1, keepdim=True) + 1e-12)
+        channel_zncc = torch.matmul(norm_src, norm_dst.t()) / (
+            torch.matmul(std_src, std_dst.t()) * src_grad.shape[1]
+        )
+        total_zncc += channel_zncc
+    
+    zncc = (total_zncc / 3.0)
+    zncc = zncc.cpu().numpy() if not in_cuda else zncc
+
+    return zncc * (-1.0)
 
 def image2patch(image, k_size):
     """get patch buffer for each pixel location from an input image; For boundary locations, use zero padding
@@ -296,8 +367,8 @@ def compute_disparity_map(rgb_i, rgb_j, d0, k_size=5, kernel_func=ssd_kernel, im
     patches_j = img2patch_func(rgb_j.astype(float) / 255.0, k_size)
     
     vi_idx, vj_idx = np.arange(h), np.arange(h)
-    disp_candidates = vi_idx[:, None] - vj_idx[None, :] + d0
-    valid_disp_mask = disp_candidates > 0.0
+    disp_candidates = vj_idx[None, :] - vi_idx[:, None] + d0
+    valid_disp_mask = disp_candidates >= 0.0
 
     for u in range(w):
 
