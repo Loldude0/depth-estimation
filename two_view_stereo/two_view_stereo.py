@@ -9,6 +9,8 @@ import pyrender
 import trimesh
 import cv2
 import open3d as o3d
+import torch
+import math
 
 
 from two_view_stereo.dataloader import load_middlebury_data
@@ -127,7 +129,7 @@ def compute_rectification_R(T_ij):
     return R_irect
 
 
-def ssd_kernel(src, dst):
+def ssd_kernel(src, dst, in_cuda=False):
     """Compute SSD Error, the RGB channels should be treated saperately and finally summed up
 
     Parameters
@@ -147,7 +149,14 @@ def ssd_kernel(src, dst):
     assert src.shape[1:] == dst.shape[1:]
 
     """Student Code Starts"""
-    
+    src = torch.from_numpy(src).cuda() if not in_cuda else src
+    dst = torch.from_numpy(dst).cuda() if not in_cuda else dst
+    src_sq = (src ** 2).sum(dim=(1, 2)).unsqueeze(1)
+    dst_sq = (dst ** 2).sum(dim=(1, 2)).unsqueeze(0)
+    dot = torch.matmul(src.view(src.shape[0], -1), dst.view(dst.shape[0], -1).t())
+    ssd = src_sq + dst_sq - 2 * dot
+    ssd = ssd.cpu().numpy() if not in_cuda else ssd
+
     """Student Code Ends"""
 
     return ssd  # M,N
@@ -179,7 +188,7 @@ def sad_kernel(src, dst):
     return sad  # M,N
 
 
-def zncc_kernel(src, dst):
+def zncc_kernel(src, dst, in_cuda=False):
     """Compute negative zncc similarity, the RGB channels should be treated saperately and finally summed up
 
     Parameters
@@ -199,7 +208,26 @@ def zncc_kernel(src, dst):
     assert src.shape[1:] == dst.shape[1:]
 
     """Student Code Starts"""
+    src = torch.from_numpy(src).cuda() if not in_cuda else src
+    dst = torch.from_numpy(dst).cuda() if not in_cuda else dst
+    total_zncc = torch.zeros((src.shape[0], dst.shape[0]), device='cuda')
+    for c in range(3):
+        src_c = src[..., c]
+        dst_c = dst[..., c]
+        mean_src = src_c.mean(dim=1, keepdim=True)
+        mean_dst = dst_c.mean(dim=1, keepdim=True)
+        norm_src = src_c - mean_src
+        norm_dst = dst_c - mean_dst
+        std_src = torch.sqrt(torch.sum(norm_src**2, dim=1, keepdim=True) + 1e-12)
+        std_dst = torch.sqrt(torch.sum(norm_dst**2, dim=1, keepdim=True) + 1e-12)
+        channel_zncc = torch.matmul(norm_src, norm_dst.t()) / (
+            torch.matmul(std_src, std_dst.t()) * src_c.shape[1]
+        )
+        total_zncc += channel_zncc
     
+    zncc = (total_zncc / 3.0)
+    zncc = zncc.cpu().numpy() if not in_cuda else zncc
+
     """Student Code Ends"""
 
     return zncc * (-1.0)  # M,N
@@ -220,7 +248,15 @@ def image2patch(image, k_size):
     """
 
     """Student Code Starts"""
-    
+    height, width, color = image.shape
+    padding = k_size // 2
+    image = np.pad(image, ((padding, padding), (padding, padding), (0, 0)), mode='constant')
+    patch_buffer = np.zeros((height, width, k_size**2, color))
+
+    for i in range(height):
+        for j in range(width):
+            patch_buffer[i, j] = image[i:i+k_size, j:j+k_size, :].reshape(-1, color)    
+
     """Student Code Starts"""
 
     return patch_buffer  # H,W,K**2,3
@@ -251,6 +287,30 @@ def compute_disparity_map(rgb_i, rgb_j, d0, k_size=5, kernel_func=ssd_kernel, im
     """
 
     """Student Code Starts"""
+    h, w = rgb_i.shape[:2]
+    
+    disp_map = np.zeros((h, w), dtype=np.float64)
+    lr_consistency_mask = np.zeros((h, w), dtype=np.float64)
+    
+    patches_i = img2patch_func(rgb_i.astype(float) / 255.0, k_size)
+    patches_j = img2patch_func(rgb_j.astype(float) / 255.0, k_size)
+    
+    vi_idx, vj_idx = np.arange(h), np.arange(h)
+    disp_candidates = vi_idx[:, None] - vj_idx[None, :] + d0
+    valid_disp_mask = disp_candidates > 0.0
+
+    for u in range(w):
+
+        buf_i, buf_j = patches_i[:, u], patches_j[:, u]
+        value = kernel_func(buf_i, buf_j)
+        _upper = value.max() + 1.0
+        value[~valid_disp_mask] = _upper
+        
+        for v in range(h):
+            best_matched_right_pixel = value[v].argmin()
+            best_matched_left_pixel = value[:, best_matched_right_pixel].argmin()
+            disp_map[v, u] = disp_candidates[v, best_matched_right_pixel]
+            lr_consistency_mask[v, u] = float(best_matched_left_pixel == v)
     
     """Student Code Ends"""
 
