@@ -410,7 +410,21 @@ def compute_dep_and_pcl(disp_map, B, K):
     """
 
     """Student Code Starts"""
+    dep_map = np.where(disp_map > 0, B * K[0, 0] / disp_map, 0) # depth calculation
+    H, W = disp_map.shape
+    u, v = np.meshgrid(np.arange(W), np.arange(H))
+    fx, fy = K[0, 0], K[1, 1]  # focal lengths
+    u0, v0 = K[0, 2], K[1, 2]  # principal points
+
+    x_norm = (u - u0) / fx
+    y_norm = (v - v0) / fy
+
+    xyz_cam = np.zeros((H, W, 3), dtype=np.float32)
     
+    xyz_cam[..., 0] = x_norm * dep_map # 3D X, ... for 3D array
+    xyz_cam[..., 1] = y_norm * dep_map 
+    xyz_cam[..., 2] = dep_map # z is now equal to depth
+
     """Student Code Ends"""
 
     return dep_map, xyz_cam
@@ -469,6 +483,10 @@ def postprocess(
     pcl_color = rgb.reshape(-1, 3)[mask.reshape(-1) > 0]
 
     """Student Code Starts"""
+
+    R_wc = R_cw.T # transpose of rotation matrix
+    T_wc = -R_wc @ T_cw.reshape(3, 1) # camera -> world
+    pcl_world = (R_wc @ pcl_cam.T).T + T_wc.T # transformation
     
     """Student Code Ends"""
 
@@ -476,6 +494,7 @@ def postprocess(
     # np.savetxt("./debug_pcl_rect.txt", np.concatenate([pcl_cam, pcl_color], -1))
 
     return mask, pcl_world, pcl_cam, pcl_color
+
 
 
 def two_view(view_i, view_j, k_size=5, kernel_func=ssd_kernel):
